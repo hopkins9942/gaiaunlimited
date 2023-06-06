@@ -167,10 +167,12 @@ class SubsampleSelectionFunction(SelectionFunctionBase):
     def __init__(self, subsample_query, file_name, hplevel_and_binning):
         def _download_binned_subset(self):
             query_to_gaia = f"""SELECT {self.column_names_for_select_clause} COUNT(*) AS n, SUM(selection) AS k
-                                    FROM (SELECT {self.binning}
+                                    FROM (
+                                        SELECT {self.binning}
                                         to_integer(IF_THEN_ELSE('{self.subsample_query}',1.0,0.0)) AS selection
-                                        FROM gaiadr3.gaia_source
-                                        WHERE {self.where_clause.strip("AND ")}) AS subquery
+                                        FROM gaiadr3.gaia_source AS s JOIN gaiadr3.astrophysical_parameters AS ap USING (source_id)
+                                        WHERE {self.where_clause.strip("AND ")}
+                                        ) AS subquery
                                     GROUP BY {self.group_by_clause}"""
             job = Gaia.launch_job_async(query_to_gaia, name=self.file_name)
             r = job.get_results()
@@ -206,7 +208,12 @@ class SubsampleSelectionFunction(SelectionFunctionBase):
                 )
             self.column_names_for_select_clause = self.column_names_for_select_clause + key + "_" + ", "
         self.group_by_clause = self.column_names_for_select_clause.strip(", ")
-
+        
+        #MJH20230606 - to see what I'm dealing with
+        print(self.column_names_for_select_clause) # healpix_, phot_g_mean_mag_, g_rp_, parallax_, 
+        print(self.group_by_clause) # healpix_, phot_g_mean_mag_, g_rp_, parallax_
+        print(self.where_clause) # phot_g_mean_mag > 3 AND phot_g_mean_mag < 20 AND g_rp > -2.5 AND g_rp < 5.1 AND parallax > 10 AND parallax < 30 AND
+        
         if (fetch_utils.get_datadir() / f"{self.file_name}.csv").exists():
             with open(fetch_utils.get_datadir() / f"{self.file_name}.csv", "r") as f:
                 params = f.readline()
@@ -219,7 +226,8 @@ class SubsampleSelectionFunction(SelectionFunctionBase):
                 df = _download_binned_subset(self)
         else:
             df = _download_binned_subset(self)
-
+        print(df)#MJH20230606 - to see what I'm dealing with
+        print(np.unique(df['g_rp_']))#MJH20230606 - to see what I'm dealing with
         columns = [key + "_" for key in self.hplevel_and_binning.keys()]
         columns += ["n", "k"]
         df = df[columns]
@@ -229,7 +237,7 @@ class SubsampleSelectionFunction(SelectionFunctionBase):
         df["logit_p_variance"] = logit(df["p_variance"])
         dset_dr3 = xr.Dataset.from_dataframe(
             df.set_index([key + "_" for key in self.hplevel_and_binning.keys()])
-        )
+        ) #makes a dataset from df, indexed by what looks like multindex in bins
         dict_coords = {}
         for key in self.hplevel_and_binning.keys():
             if key == "healpix":
@@ -237,6 +245,8 @@ class SubsampleSelectionFunction(SelectionFunctionBase):
             dict_coords[key + "_"] = np.arange(
                 self.hplevel_and_binning[key][0] + self.hplevel_and_binning[key][2] / 2, self.hplevel_and_binning[key][1], self.hplevel_and_binning[key][2]
             )
+        print(dict_coords) ##MJH20230606 - to see what I'm dealing with
+        print(dset_dr3) ##MJH20230606 - to see what I'm dealing with
         dset_dr3 = dset_dr3.assign_coords(dict_coords)
         dset_dr3 = dset_dr3.rename({"healpix_": "ipix"})
         super().__init__(dset_dr3)
