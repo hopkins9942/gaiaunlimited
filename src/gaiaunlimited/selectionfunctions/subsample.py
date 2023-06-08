@@ -206,7 +206,7 @@ class SubsampleSelectionFunction(SelectionFunctionBase):
                 )
             self.column_names_for_select_clause = self.column_names_for_select_clause + key + "_" + ", "
         self.group_by_clause = self.column_names_for_select_clause.strip(", ")
-        
+
         if (fetch_utils.get_datadir() / f"{self.file_name}.csv").exists():
             with open(fetch_utils.get_datadir() / f"{self.file_name}.csv", "r") as f:
                 params = f.readline()
@@ -219,7 +219,7 @@ class SubsampleSelectionFunction(SelectionFunctionBase):
                 df = _download_binned_subset(self)
         else:
             df = _download_binned_subset(self)
-        
+
         columns = [key + "_" for key in self.hplevel_and_binning.keys()]
         columns += ["n", "k"]
         df = df[columns]
@@ -229,7 +229,7 @@ class SubsampleSelectionFunction(SelectionFunctionBase):
         df["logit_p_variance"] = logit(df["p_variance"])
         dset_dr3 = xr.Dataset.from_dataframe(
             df.set_index([key + "_" for key in self.hplevel_and_binning.keys()])
-        ) #makes a dataset from df, indexed by what looks like multindex in bins
+        )
         dict_coords = {}
         for key in self.hplevel_and_binning.keys():
             if key == "healpix":
