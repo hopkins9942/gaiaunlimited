@@ -7,6 +7,8 @@ from scipy.special import expit, logit
 from astroquery.gaia import Gaia
 import ast
 
+import time#MJH
+
 from .. import fetch_utils, utils
 
 __all__ = [
@@ -162,51 +164,134 @@ class SubsampleSelectionFunction(SelectionFunctionBase):
         P(is in subsample| is in Gaia and has G and G_RP)
 
     as a function of G magnitude and G-RP color.
+    
+    MJH20230609: wanted to subsample based on metallicity, so added option
+    to join gaiadr3.astrophysical_parameters. This made it slower, so I am
+    cosidering making queries work one bin at a time.
+    
+    Additionally had problems when an interval in a particular quantity
+    had no stars, as this interval then wasn't carried forwards resulting in 
+    different sizes:
+    ValueError: conflicting sizes for dimension 'phot_g_mean_mag_': length 0 on
+    'n' and length 1 on {'healpix_': 'healpix_', 'phot_g_mean_mag_': 
+                         'phot_g_mean_mag_', 'g_rp_': 'g_rp_'}
+    If it is a pixel instead of a g or c bin with no stars, problem appears 
+    when you try to query SF as:
+    ValueError: Wrong pixel number (it is not 12*nside**2)
+    
+    Finally, this causes hidden errors in query, as the interpolation used to 
+    get the value at the centre of each pixel/bin will mean if a bin is missing
+    it will pick up the value of a neighbour.
+    
+    I'm going to try making one query per bin to resolve each of these problems.
+    To solve problem of n=0 errors, need bin to be included even when n=0
+    This means doing query in different way. I'll make df first, then populate
+    n and k with a simple query each.
+    
+    Multiple queries open up the possibility of multiprocessing the queries
+    for another speed up
     """
 
-    def __init__(self, subsample_query, file_name, hplevel_and_binning, use_astrophysical_parameters=True):
+    def __init__(self, subsample_query, file_name, hplevel_and_binning, use_astrophysical_parameters=False):
+        # def _download_binned_subset(self):
+        #     query_to_gaia = f"""SELECT {self.column_names_for_select_clause} COUNT(*) AS n, SUM(selection) AS k
+        #                             FROM (SELECT {self.binning}
+        #                                 to_integer(IF_THEN_ELSE('{self.subsample_query}',1.0,0.0)) AS selection
+        #                                 FROM gaiadr3.gaia_source {'JOIN gaiadr3.astrophysical_parameters USING (source_id)' if use_astrophysical_parameters else ''}
+        #                                 WHERE {self.where_clause.strip("AND ")}) AS subquery
+        #                             GROUP BY {self.group_by_clause}"""
+        #     job = Gaia.launch_job_async(query_to_gaia, name=self.file_name)
+        #     r = job.get_results()
+        #     df = r.to_pandas()
+        #     columns = [key + "_" for key in self.hplevel_and_binning.keys()]
+        #     columns += ["n", "k"]
+        #     with open(fetch_utils.get_datadir() / f"{self.file_name}.csv", "w") as f:
+        #         f.write(f"#{self.hplevel_and_binning}\n")
+        #         df[columns].to_csv(f, index = False)
+        #     return df[columns]
+
+        # self.subsample_query = subsample_query
+        # self.file_name = file_name
+        # self.hplevel_and_binning = hplevel_and_binning
+        # self.column_names_for_select_clause = "" 
+        # self.binning = ""
+        # self.where_clause = "" 
+        # for key in self.hplevel_and_binning.keys():
+        #     if key == "healpix":
+        #         self.healpix_level = self.hplevel_and_binning[key]
+        #         self.binning = (
+        #             self.binning
+        #             + f"""to_integer(GAIA_HEALPIX_INDEX({self.healpix_level},source_id)) AS {key+"_"}, """
+        #         )
+        #     else:
+        #         self.low, self.high, self.bins = self.hplevel_and_binning[key]
+        #         self.binning = (
+        #             self.binning
+        #             + f"""to_integer(floor(({key} - {self.low})/{self.bins})) AS {key+"_"}, """
+        #         )
+        #         self.where_clause = (
+        #             self.where_clause + f"""{key} > {self.low} AND {key} < {self.high} AND """
+        #         )
+        #     self.column_names_for_select_clause = self.column_names_for_select_clause + key + "_" + ", "
+        # self.group_by_clause = self.column_names_for_select_clause.strip(", ") 
+        
+        self.subsample_query = subsample_query
+        self.file_name = file_name
+        self.hplevel_and_binning = hplevel_and_binning
+        
+        binKeys = list(self.hplevel_and_binning.keys())
+        if 'healpix' in self.hplevel_and_binning.keys():
+            #seems original code was constructed so healpix not necessary
+            using_healpix = True
+            healpix_level = self.hplevel_and_binning['healpix']
+            binKeys.remove('healpix')
+        else:
+            using_healpix = False
+
+        shape = [] # shape of non-healpix bins
+        for key in binKeys:
+            lowlim, highlim, binwidth = self.hplevel_and_binning[key]
+            shape.append(int(np.floor((highlim-lowlim)/binwidth)))
+
         def _download_binned_subset(self):
-            query_to_gaia = f"""SELECT {self.column_names_for_select_clause} COUNT(*) AS n, SUM(selection) AS k
-                                    FROM (SELECT {self.binning}
-                                        to_integer(IF_THEN_ELSE('{self.subsample_query}',1.0,0.0)) AS selection
-                                        FROM gaiadr3.gaia_source {'JOIN gaiadr3.astrophysical_parameters USING (source_id)' if use_astrophysical_parameters else ''}
-                                        WHERE {self.where_clause.strip("AND ")}) AS subquery
-                                    GROUP BY {self.group_by_clause}"""
-            job = Gaia.launch_job_async(query_to_gaia, name=self.file_name)
-            r = job.get_results()
-            df = r.to_pandas()
+            """Difference to original - does one query for each bin.
+            Using WHERE rather than to_integer(floor(...)) to get n and k for each healpix for each bin will hopefully be faster by reducing calculations within query and gives idea of progress"""
             columns = [key + "_" for key in self.hplevel_and_binning.keys()]
             columns += ["n", "k"]
+            Nbins = np.product(shape)
+            dfList = []
+            startTime=time.time()
+            for k in range(Nbins):
+                mI = np.unravel_index(k, shape)
+                #for each loop mI[0] is the index of the bin of the first key, mI[1] the second etc
+                # these become values of phot_g_mean_mag_,g_rp_ etc in df
+
+                in_bin=''
+                for keyNum, key in enumerate(binKeys):
+                    lowlim, highlim, binwidth = self.hplevel_and_binning[key]
+                    low =  lowlim + binwidth*mI[keyNum]
+                    high = lowlim + binwidth*(mI[keyNum]+1)
+                    in_bin += f'{low}<={key} AND {key}<{high} AND ' 
+                in_bin = in_bin.strip("AND ")
+
+                query_to_gaia = f"""SELECT {'healpix_,' if using_healpix else ''} COUNT(*) AS n, SUM(selection) AS k
+                    FROM (SELECT {f'TO_INTEGER(GAIA_HEALPIX_INDEX({healpix_level}, source_id)) AS healpix_,' if using_healpix else ''}
+                          IF_THEN_ELSE('{subsample_query}', 1,0) AS selection FROM gaiadr3.gaia_source
+                          {'JOIN gaiadr3.astrophysical_parameters USING (source_id)' if use_astrophysical_parameters else ''}
+                          WHERE {in_bin}) AS subquery {'GROUP BY healpix_' if using_healpix else ''}"""
+
+                job = Gaia.launch_job_async(query_to_gaia, name=self.file_name)
+                if k%10==0: print(f'***Query {k}/{Nbins} done, time elapsed = {time.time()-startTime} sec***')
+                r = job.get_results()
+                dfList.append(r.to_pandas())
+                
+            df = pd.concat(dfList)
             with open(fetch_utils.get_datadir() / f"{self.file_name}.csv", "w") as f:
                 f.write(f"#{self.hplevel_and_binning}\n")
                 df[columns].to_csv(f, index = False)
             return df[columns]
-
-        self.subsample_query = subsample_query
-        self.file_name = file_name
-        self.hplevel_and_binning = hplevel_and_binning
-        self.column_names_for_select_clause = ""
-        self.binning = ""
-        self.where_clause = ""
-        for key in self.hplevel_and_binning.keys():
-            if key == "healpix":
-                self.healpix_level = self.hplevel_and_binning[key]
-                self.binning = (
-                    self.binning
-                    + f"""to_integer(GAIA_HEALPIX_INDEX({self.healpix_level},source_id)) AS {key+"_"}, """
-                )
-            else:
-                self.low, self.high, self.bins = self.hplevel_and_binning[key]
-                self.binning = (
-                    self.binning
-                    + f"""to_integer(floor(({key} - {self.low})/{self.bins})) AS {key+"_"}, """
-                )
-                self.where_clause = (
-                    self.where_clause + f"""{key} > {self.low} AND {key} < {self.high} AND """
-                )
-            self.column_names_for_select_clause = self.column_names_for_select_clause + key + "_" + ", "
-        self.group_by_clause = self.column_names_for_select_clause.strip(", ")
-
+        
+        #preserved below here
         if (fetch_utils.get_datadir() / f"{self.file_name}.csv").exists():
             with open(fetch_utils.get_datadir() / f"{self.file_name}.csv", "r") as f:
                 params = f.readline()
