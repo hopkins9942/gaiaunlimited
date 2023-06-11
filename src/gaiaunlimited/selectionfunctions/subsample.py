@@ -190,6 +190,9 @@ class SubsampleSelectionFunction(SelectionFunctionBase):
     
     Multiple queries open up the possibility of multiprocessing the queries
     for another speed up
+    
+    On tsting, this method is slower than original, so returning to orginal
+    query strategy
     """
 
     def __init__(self, subsample_query, file_name, hplevel_and_binning, use_astrophysical_parameters=False):
